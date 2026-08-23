@@ -1,0 +1,21 @@
+{
+  "base_repo": "https://github.com/khodemadi/termianl-chat",
+  "base_commit_main_rs": "9d1117c2b04331645996acf0e33d708ccbd4f661",
+  "hotfix_version": "0.3.0-hotfix",
+  "files": [
+    "Cargo.toml",
+    "src/main.rs",
+    "HOTFIX.md"
+  ],
+  "features": [
+    "RTL/BiDi display",
+    "X25519 + XChaCha20-Poly1305 payload encryption",
+    "/files picker",
+    "encrypted chunked file transfer",
+    "download path"
+  ],
+  "not_claimed": [
+    "MITM-resistant identity authentication",
+    "verified cargo build in this environment"
+  ]
+}
