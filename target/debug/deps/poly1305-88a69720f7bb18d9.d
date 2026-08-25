@@ -1,0 +1,11 @@
+/home/madi/w/termianl-chat/target/debug/deps/poly1305-88a69720f7bb18d9.d: /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/lib.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/backend.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/backend/avx2.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/backend/avx2/helpers.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/backend/autodetect.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/backend/soft.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/../README.md
+
+/home/madi/w/termianl-chat/target/debug/deps/libpoly1305-88a69720f7bb18d9.rmeta: /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/lib.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/backend.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/backend/avx2.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/backend/avx2/helpers.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/backend/autodetect.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/backend/soft.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/../README.md
+
+/home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/lib.rs:
+/home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/backend.rs:
+/home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/backend/avx2.rs:
+/home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/backend/avx2/helpers.rs:
+/home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/backend/autodetect.rs:
+/home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/backend/soft.rs:
+/home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/poly1305-0.9.1/src/../README.md:

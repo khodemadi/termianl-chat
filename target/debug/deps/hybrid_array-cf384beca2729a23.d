@@ -1,0 +1,11 @@
+/home/madi/w/termianl-chat/target/debug/deps/hybrid_array-cf384beca2729a23.d: /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/lib.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/sizes.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/flatten.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/from_fn.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/iter.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/traits.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/../README.md
+
+/home/madi/w/termianl-chat/target/debug/deps/libhybrid_array-cf384beca2729a23.rmeta: /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/lib.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/sizes.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/flatten.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/from_fn.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/iter.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/traits.rs /home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/../README.md
+
+/home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/lib.rs:
+/home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/sizes.rs:
+/home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/flatten.rs:
+/home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/from_fn.rs:
+/home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/iter.rs:
+/home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/traits.rs:
+/home/madi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hybrid-array-0.4.14/src/../README.md:

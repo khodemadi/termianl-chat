@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     env,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{self, stdout, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
@@ -32,7 +32,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    fs::{File as TokioFile, OpenOptions as TokioOpenOptions},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream, UdpSocket},
     sync::{mpsc, RwLock},
 };
@@ -73,11 +74,13 @@ enum Packet {
         port: u16,
         pubkey: [u8; 32],
     },
+
     Chat {
         from: String,
         ciphertext: String,
         timestamp: u64,
     },
+
     File {
         from: String,
         name: String,
@@ -90,14 +93,31 @@ enum Packet {
 
 #[derive(Debug)]
 enum AppEvent {
-    IncomingChat { from: String, text: String },
-    IncomingFile {
+    IncomingChat {
+        from: String,
+        text: String,
+    },
+
+    IncomingFileComplete {
+        from: String,
+        path: PathBuf,
+    },
+
+    IncomingFileError {
         from: String,
         name: String,
-        size: u64,
-        index: u64,
-        total: u64,
-        data: Vec<u8>,
+        error: String,
+    },
+
+    OutgoingFileComplete {
+        peer_id: String,
+        path: PathBuf,
+    },
+
+    OutgoingFileError {
+        peer_id: String,
+        path: PathBuf,
+        error: String,
     },
 }
 
@@ -114,6 +134,14 @@ struct FilePicker {
     selected: usize,
 }
 
+#[derive(Debug)]
+struct IncomingFile {
+    path: PathBuf,
+    size: u64,
+    total: u64,
+    received: u64,
+}
+
 type Peers = Arc<RwLock<HashMap<String, Peer>>>;
 
 fn now() -> u64 {
@@ -125,6 +153,7 @@ fn now() -> u64 {
 
 fn clock() -> String {
     let secs = now() % 86_400;
+
     format!(
         "{:02}:{:02}:{:02}",
         secs / 3600,
@@ -146,25 +175,34 @@ fn shared_key(secret: &[u8; 32], peer_public: &[u8; 32]) -> [u8; 32] {
 fn encrypt_bytes(key_bytes: &[u8; 32], plaintext: &[u8]) -> Result<String> {
     let key = Key::from_slice(key_bytes);
     let cipher = XChaCha20Poly1305::new(key);
+
     let mut nonce_bytes = [0u8; 24];
     thread_rng().fill_bytes(&mut nonce_bytes);
+
     let nonce = XNonce::from_slice(&nonce_bytes);
+
     let ciphertext = cipher
         .encrypt(nonce, plaintext)
         .context("encryption failed")?;
+
     let mut packet = nonce_bytes.to_vec();
     packet.extend_from_slice(&ciphertext);
+
     Ok(B64.encode(packet))
 }
 
 fn decrypt_bytes(key_bytes: &[u8; 32], encoded: &str) -> Result<Vec<u8>> {
     let raw = B64.decode(encoded).context("invalid encrypted payload")?;
+
     if raw.len() < 24 {
         anyhow::bail!("encrypted payload is too short");
     }
+
     let (nonce_bytes, ciphertext) = raw.split_at(24);
+
     let key = Key::from_slice(key_bytes);
     let cipher = XChaCha20Poly1305::new(key);
+
     cipher
         .decrypt(XNonce::from_slice(nonce_bytes), ciphertext)
         .map_err(|_| anyhow::anyhow!("authentication/decryption failed"))
@@ -176,9 +214,12 @@ fn rtl_visual(text: &str) -> String {
             if line.is_empty() {
                 return String::new();
             }
+
             let bidi = BidiInfo::new(line, None);
+
             if bidi.has_rtl() {
                 let para = &bidi.paragraphs[0];
+
                 bidi.reorder_line(para, para.range.clone()).into_owned()
             } else {
                 line.to_string()
@@ -212,6 +253,7 @@ fn load_entries(cwd: &Path) -> Vec<FileEntry> {
     if let Ok(read_dir) = fs::read_dir(cwd) {
         for item in read_dir.flatten() {
             let path = item.path();
+
             if let Ok(meta) = item.metadata() {
                 entries.push(FileEntry {
                     path,
@@ -226,6 +268,7 @@ fn load_entries(cwd: &Path) -> Vec<FileEntry> {
             .cmp(&a.is_dir)
             .then_with(|| a.path.file_name().cmp(&b.path.file_name()))
     });
+
     entries
 }
 
@@ -233,6 +276,7 @@ impl FilePicker {
     fn new() -> Self {
         let cwd = home_dir();
         let entries = load_entries(&cwd);
+
         Self {
             cwd,
             entries,
@@ -242,6 +286,7 @@ impl FilePicker {
 
     fn reload(&mut self) {
         self.entries = load_entries(&self.cwd);
+
         if self.entries.is_empty() {
             self.selected = 0;
         } else {
@@ -266,64 +311,80 @@ impl FilePicker {
 
 fn unique_download_path(name: &str) -> PathBuf {
     let dir = download_dir();
+
     let _ = fs::create_dir_all(&dir);
+
     let original = Path::new(name)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("file.bin");
 
     let candidate = dir.join(original);
+
     if !candidate.exists() {
         return candidate;
     }
 
     let path = Path::new(original);
+
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+
     let ext = path.extension().and_then(|s| s.to_str());
+
     for i in 1..10_000 {
         let filename = match ext {
             Some(ext) => format!("{stem} ({i}).{ext}"),
             None => format!("{stem} ({i})"),
         };
+
         let candidate = dir.join(filename);
+
         if !candidate.exists() {
             return candidate;
         }
     }
+
     dir.join(format!("{}-{}", now(), original))
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let name = env::args()
-        .nth(1)
-        .unwrap_or_else(|| {
-            get()
-                .ok()
-                .and_then(|x| x.into_string().ok())
-                .unwrap_or_else(|| "user".into())
-        });
+    let name = env::args().nth(1).unwrap_or_else(|| {
+        get()
+            .ok()
+            .and_then(|x| x.into_string().ok())
+            .unwrap_or_else(|| "user".into())
+    });
 
     let mut secret = [0u8; 32];
     thread_rng().fill_bytes(&mut secret);
+
     let my_pubkey = public_key(&secret);
 
     let id: String = {
         let mut bytes = [0u8; 6];
+
         thread_rng().fill_bytes(&mut bytes);
+
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     };
 
     let peers: Peers = Arc::new(RwLock::new(HashMap::new()));
+
     let udp = Arc::new(UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)).await?);
+
     udp.set_broadcast(true)?;
+
     let tcp = TcpListener::bind(("0.0.0.0", CHAT_PORT))
         .await
         .context("TCP port 45455 is unavailable")?;
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AppEvent>();
 
-    // Discovery receiver. Hello is intentionally small and contains only public key material.
+    // ------------------------------------------------------------
+    // DISCOVERY RECEIVER
+    // ------------------------------------------------------------
+
     {
         let peers = peers.clone();
         let udp = udp.clone();
@@ -333,9 +394,16 @@ async fn main() -> Result<()> {
 
         tokio::spawn(async move {
             let mut buf = [0u8; 4096];
+
             loop {
-                let Ok((n, src)) = udp.recv_from(&mut buf).await else { continue };
-                let Ok(s) = std::str::from_utf8(&buf[..n]) else { continue };
+                let Ok((n, src)) = udp.recv_from(&mut buf).await else {
+                    continue;
+                };
+
+                let Ok(s) = std::str::from_utf8(&buf[..n]) else {
+                    continue;
+                };
+
                 if !s.starts_with(MAGIC) {
                     continue;
                 }
@@ -371,23 +439,26 @@ async fn main() -> Result<()> {
                     port: CHAT_PORT,
                     pubkey: my_pubkey,
                 };
+
                 if let Ok(bytes) = serde_json::to_vec(&reply) {
                     let msg = format!("{MAGIC}{}", String::from_utf8_lossy(&bytes));
+
                     let _ = udp
-                        .send_to(
-                            msg.as_bytes(),
-                            SocketAddr::new(src.ip(), DISCOVERY_PORT),
-                        )
+                        .send_to(msg.as_bytes(), SocketAddr::new(src.ip(), DISCOVERY_PORT))
                         .await;
                 }
             }
         });
     }
 
-    // Discovery broadcast.
+    // ------------------------------------------------------------
+    // DISCOVERY BROADCAST
+    // ------------------------------------------------------------
+
     {
         let udp = udp.clone();
         let peers = peers.clone();
+
         let my_id = id.clone();
         let my_name = name.clone();
         let my_pubkey = my_pubkey;
@@ -403,25 +474,31 @@ async fn main() -> Result<()> {
 
                 if let Ok(bytes) = serde_json::to_vec(&packet) {
                     let msg = format!("{MAGIC}{}", String::from_utf8_lossy(&bytes));
+
                     let _ = udp
                         .send_to(
                             msg.as_bytes(),
-                            SocketAddr::new(
-                                IpAddr::V4(Ipv4Addr::BROADCAST),
-                                DISCOVERY_PORT,
-                            ),
+                            SocketAddr::new(IpAddr::V4(Ipv4Addr::BROADCAST), DISCOVERY_PORT),
                         )
                         .await;
                 }
 
                 let cutoff = now().saturating_sub(15);
+
                 peers.write().await.retain(|_, p| p.last_seen >= cutoff);
+
                 tokio::time::sleep(Duration::from_secs(3)).await;
             }
         });
     }
 
-    // TCP receiver. Chat/file payloads are authenticated-encrypted.
+    // ------------------------------------------------------------
+    // TCP RECEIVER
+    //
+    // IMPORTANT:
+    // File writing happens here, NOT in run_ui().
+    // ------------------------------------------------------------
+
     {
         let tx = event_tx.clone();
         let peers = peers.clone();
@@ -429,7 +506,10 @@ async fn main() -> Result<()> {
 
         tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = tcp.accept().await else { continue };
+                let Ok((stream, _addr)) = tcp.accept().await else {
+                    continue;
+                };
+
                 let tx = tx.clone();
                 let peers = peers.clone();
 
@@ -437,26 +517,41 @@ async fn main() -> Result<()> {
                     let mut reader = BufReader::new(stream);
                     let mut line = String::new();
 
-                    while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    // Each TCP connection has its own file state.
+                    // The sender sends all chunks of a file over one
+                    // connection, so chunks remain ordered here.
+                    let mut incoming_files: HashMap<String, IncomingFile> = HashMap::new();
+
+                    loop {
+                        let bytes_read = reader.read_line(&mut line).await.unwrap_or(0);
+
+                        if bytes_read == 0 {
+                            break;
+                        }
+
                         let parsed = serde_json::from_str::<Packet>(line.trim());
+
                         line.clear();
 
-                        let Ok(packet) = parsed else { continue };
+                        let Ok(packet) = parsed else {
+                            continue;
+                        };
 
                         match packet {
                             Packet::Chat {
-                                from,
-                                ciphertext,
-                                ..
+                                from, ciphertext, ..
                             } => {
                                 let peer = peers.read().await.get(&from).cloned();
-                                let Some(peer) = peer else { continue };
+
+                                let Some(peer) = peer else {
+                                    continue;
+                                };
+
                                 let key = shared_key(&my_secret, &peer.pubkey);
 
                                 if let Ok(bytes) = decrypt_bytes(&key, &ciphertext) {
                                     if let Ok(text) = String::from_utf8(bytes) {
-                                        let _ =
-                                            tx.send(AppEvent::IncomingChat { from, text });
+                                        let _ = tx.send(AppEvent::IncomingChat { from, text });
                                     }
                                 }
                             }
@@ -470,18 +565,113 @@ async fn main() -> Result<()> {
                                 ciphertext,
                             } => {
                                 let peer = peers.read().await.get(&from).cloned();
-                                let Some(peer) = peer else { continue };
+
+                                let Some(peer) = peer else {
+                                    continue;
+                                };
+
                                 let key = shared_key(&my_secret, &peer.pubkey);
 
-                                if let Ok(data) = decrypt_bytes(&key, &ciphertext) {
-                                    let _ = tx.send(AppEvent::IncomingFile {
-                                        from,
-                                        name,
-                                        size,
-                                        index,
-                                        total,
-                                        data,
-                                    });
+                                let data = match decrypt_bytes(&key, &ciphertext) {
+                                    Ok(data) => data,
+                                    Err(err) => {
+                                        let _ = tx.send(AppEvent::IncomingFileError {
+                                            from,
+                                            name,
+                                            error: err.to_string(),
+                                        });
+
+                                        continue;
+                                    }
+                                };
+
+                                let file_key = format!("{from}:{name}");
+
+                                if !incoming_files.contains_key(&file_key) {
+                                    let path = unique_download_path(&name);
+
+                                    if let Some(parent) = path.parent() {
+                                        if let Err(err) = tokio::fs::create_dir_all(parent).await {
+                                            let _ = tx.send(AppEvent::IncomingFileError {
+                                                from,
+                                                name,
+                                                error: err.to_string(),
+                                            });
+
+                                            continue;
+                                        }
+                                    }
+
+                                    if let Err(err) = TokioFile::create(&path).await {
+                                        let _ = tx.send(AppEvent::IncomingFileError {
+                                            from,
+                                            name,
+                                            error: err.to_string(),
+                                        });
+
+                                        continue;
+                                    }
+
+                                    incoming_files.insert(
+                                        file_key.clone(),
+                                        IncomingFile {
+                                            path,
+                                            size,
+                                            total,
+                                            received: 0,
+                                        },
+                                    );
+                                }
+
+                                let Some(entry) = incoming_files.get_mut(&file_key) else {
+                                    continue;
+                                };
+
+                                // Async file write:
+                                // this does NOT block the terminal UI.
+                                match TokioOpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open(&entry.path)
+                                    .await
+                                {
+                                    Ok(mut file) => {
+                                        if let Err(err) = file.write_all(&data).await {
+                                            let _ = tx.send(AppEvent::IncomingFileError {
+                                                from,
+                                                name,
+                                                error: err.to_string(),
+                                            });
+
+                                            incoming_files.remove(&file_key);
+                                            continue;
+                                        }
+                                    }
+
+                                    Err(err) => {
+                                        let _ = tx.send(AppEvent::IncomingFileError {
+                                            from,
+                                            name,
+                                            error: err.to_string(),
+                                        });
+
+                                        incoming_files.remove(&file_key);
+                                        continue;
+                                    }
+                                }
+
+                                entry.received += data.len() as u64;
+
+                                let completed =
+                                    entry.received >= entry.size || index + 1 >= entry.total;
+
+                                if completed {
+                                    if let Some(file) = incoming_files.remove(&file_key) {
+                                        let _ = tx.send(AppEvent::IncomingFileComplete {
+                                            from,
+                                            path: file.path,
+                                        });
+                                    }
                                 }
                             }
 
@@ -494,9 +684,20 @@ async fn main() -> Result<()> {
     }
 
     let mut terminal = setup_terminal()?;
-    let result =
-        run_ui(&mut terminal, &name, &id, &secret, peers, &mut event_rx).await;
+
+    let result = run_ui(
+        &mut terminal,
+        &name,
+        &id,
+        &secret,
+        peers,
+        &mut event_rx,
+        event_tx.clone(),
+    )
+    .await;
+
     restore_terminal(&mut terminal)?;
+
     result
 }
 
@@ -507,16 +708,21 @@ async fn run_ui(
     my_secret: &[u8; 32],
     peers: Peers,
     event_rx: &mut mpsc::UnboundedReceiver<AppEvent>,
+    event_tx: mpsc::UnboundedSender<AppEvent>,
 ) -> Result<()> {
     let mut selected = 0usize;
     let mut input = String::new();
     let mut messages: HashMap<String, Vec<Message>> = HashMap::new();
+
     let mut active_tab = 2usize;
     let mut should_quit = false;
     let mut picker: Option<FilePicker> = None;
-    let mut incoming_files: HashMap<String, IncomingFile> = HashMap::new();
 
     while !should_quit {
+        // --------------------------------------------------------
+        // PROCESS BACKGROUND EVENTS
+        // --------------------------------------------------------
+
         while let Ok(ev) = event_rx.try_recv() {
             match ev {
                 AppEvent::IncomingChat { from, text } => {
@@ -529,68 +735,85 @@ async fn run_ui(
                     });
                 }
 
-                AppEvent::IncomingFile {
-                    from,
-                    name,
-                    size,
-                    index,
-                    total,
-                    data,
-                } => {
-                    let key = format!("{from}:{name}");
-                    let entry = incoming_files.entry(key.clone()).or_insert_with(|| {
-                        let path = unique_download_path(&name);
-                        let _ = fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
-                        let _ = File::create(&path);
-                        IncomingFile {
-                            path,
-                            size,
-                            total,
-                            received: 0,
-                        }
+                AppEvent::IncomingFileComplete { from, path } => {
+                    let label = path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("file")
+                        .to_string();
+
+                    messages.entry(from.clone()).or_default().push(Message {
+                        from,
+                        text: format!("📎 {} ({})", label, path.display()),
+                        incoming: true,
+                        time: clock(),
+                        file_path: Some(path),
                     });
+                }
 
-                    let mut file = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&entry.path)?;
+                AppEvent::IncomingFileError { from, name, error } => {
+                    messages.entry(from.clone()).or_default().push(Message {
+                        from,
+                        text: format!("File receive failed: {} — {}", name, error),
+                        incoming: true,
+                        time: clock(),
+                        file_path: None,
+                    });
+                }
 
-                    // TCP writes are ordered for a single file stream, but index is retained
-                    // in the protocol so future parallel transfer can be added safely.
-                    let _ = index;
-                    file.write_all(&data)?;
-                    entry.received += data.len() as u64;
+                AppEvent::OutgoingFileComplete { peer_id, path } => {
+                    let filename = path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("file")
+                        .to_string();
 
-                    if entry.received >= entry.size || index + 1 >= entry.total {
-                        let path = entry.path.clone();
-                        let label = path
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("file")
-                            .to_string();
+                    messages.entry(peer_id).or_default().push(Message {
+                        from: name.to_string(),
+                        text: format!("📎 {} ({})", filename, path.display()),
+                        incoming: false,
+                        time: clock(),
+                        file_path: Some(path),
+                    });
+                }
 
-                        messages.entry(from.clone()).or_default().push(Message {
-                            from,
-                            text: format!("📎 {label}  {}", path.display()),
-                            incoming: true,
-                            time: clock(),
-                            file_path: Some(path),
-                        });
-                        incoming_files.remove(&key);
-                    }
+                AppEvent::OutgoingFileError {
+                    peer_id,
+                    path,
+                    error,
+                } => {
+                    let filename = path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("file")
+                        .to_string();
+
+                    messages.entry(peer_id).or_default().push(Message {
+                        from: name.to_string(),
+                        text: format!("File send failed: {} — {}", filename, error),
+                        incoming: false,
+                        time: clock(),
+                        file_path: None,
+                    });
                 }
             }
         }
 
         let peer_list: Vec<Peer> = {
             let mut v: Vec<Peer> = peers.read().await.values().cloned().collect();
+
             v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
             v
         };
 
         if selected >= peer_list.len() && !peer_list.is_empty() {
             selected = peer_list.len() - 1;
         }
+
+        // --------------------------------------------------------
+        // DRAW
+        // --------------------------------------------------------
 
         terminal.draw(|f| {
             draw_ui(
@@ -606,6 +829,10 @@ async fn run_ui(
             )
         })?;
 
+        // --------------------------------------------------------
+        // KEYBOARD
+        // --------------------------------------------------------
+
         if event::poll(Duration::from_millis(60))? {
             if let Event::Key(KeyEvent {
                 code,
@@ -618,18 +845,30 @@ async fn run_ui(
                     continue;
                 }
 
+                // ------------------------------------------------
+                // FILE PICKER
+                // ------------------------------------------------
+
                 if let Some(file_picker) = picker.as_mut() {
                     match code {
-                        KeyCode::Esc => picker = None,
-                        KeyCode::Up => file_picker.move_up(),
-                        KeyCode::Down => file_picker.move_down(),
+                        KeyCode::Esc => {
+                            picker = None;
+                        }
+
+                        KeyCode::Up => {
+                            file_picker.move_up();
+                        }
+
+                        KeyCode::Down => {
+                            file_picker.move_down();
+                        }
+
                         KeyCode::Enter => {
                             if let Some(entry) = file_picker.selected().cloned() {
-                                if entry.path.file_name().and_then(|n| n.to_str())
-                                    == Some("..")
-                                {
+                                if entry.path.file_name().and_then(|n| n.to_str()) == Some("..") {
                                     if let Some(parent) = file_picker.cwd.parent() {
                                         file_picker.cwd = parent.to_path_buf();
+
                                         file_picker.reload();
                                     }
                                 } else if entry.is_dir {
@@ -638,72 +877,99 @@ async fn run_ui(
                                     file_picker.reload();
                                 } else if !peer_list.is_empty() {
                                     let peer = peer_list[selected].clone();
+
                                     let path = entry.path.clone();
+
                                     picker = None;
 
-                                    if let Err(err) =
-                                        send_file(&peer, my_id, my_secret, &path).await
-                                    {
-                                        messages
-                                            .entry(peer.id.clone())
-                                            .or_default()
-                                            .push(Message {
-                                                from: name.to_string(),
-                                                text: format!("File send failed: {err}"),
-                                                incoming: false,
-                                                time: clock(),
-                                                file_path: None,
-                                            });
-                                    } else {
-                                        let filename = path
-                                            .file_name()
-                                            .and_then(|s| s.to_str())
-                                            .unwrap_or("file")
-                                            .to_string();
-                                        messages
-                                            .entry(peer.id.clone())
-                                            .or_default()
-                                            .push(Message {
-                                                from: name.to_string(),
-                                                text: format!(
-                                                    "📎 {} ({})",
-                                                    filename,
-                                                    path.display()
-                                                ),
-                                                incoming: false,
-                                                time: clock(),
-                                                file_path: Some(path),
-                                            });
-                                    }
+                                    // ------------------------------------------------
+                                    // IMPORTANT:
+                                    //
+                                    // NEVER await send_file() here.
+                                    //
+                                    // The old code did:
+                                    //
+                                    // send_file(...).await
+                                    //
+                                    // which blocked the entire TUI.
+                                    //
+                                    // Now the file transfer runs in a
+                                    // background Tokio task.
+                                    // ------------------------------------------------
+
+                                    let tx = event_tx.clone();
+                                    let peer_id = peer.id.clone();
+                                    let sender_id = my_id.to_string();
+                                    let secret = *my_secret;
+
+                                    tokio::spawn(async move {
+                                        let result =
+                                            send_file(peer, sender_id, secret, path.clone()).await;
+
+                                        match result {
+                                            Ok(()) => {
+                                                let _ = tx.send(AppEvent::OutgoingFileComplete {
+                                                    peer_id,
+                                                    path,
+                                                });
+                                            }
+
+                                            Err(err) => {
+                                                let _ = tx.send(AppEvent::OutgoingFileError {
+                                                    peer_id,
+                                                    path,
+                                                    error: err.to_string(),
+                                                });
+                                            }
+                                        }
+                                    });
                                 }
                             }
                         }
+
                         _ => {}
                     }
+
                     continue;
                 }
+
+                // ------------------------------------------------
+                // QUIT
+                // ------------------------------------------------
 
                 if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
                     should_quit = true;
                     continue;
                 }
 
+                // ------------------------------------------------
+                // NORMAL UI
+                // ------------------------------------------------
+
                 match code {
-                    KeyCode::Char('q') if input.is_empty() => should_quit = true,
-                    KeyCode::Tab => active_tab = (active_tab + 1) % 3,
+                    KeyCode::Char('q') if input.is_empty() => {
+                        should_quit = true;
+                    }
+
+                    KeyCode::Tab => {
+                        active_tab = (active_tab + 1) % 3;
+                    }
+
                     KeyCode::Up => {
                         if !peer_list.is_empty() {
                             selected = selected.saturating_sub(1);
                             active_tab = 0;
                         }
                     }
+
                     KeyCode::Down => {
                         if !peer_list.is_empty() {
-                            selected =
-                                (selected + 1).min(peer_list.len().saturating_sub(1));
+                            selected = (selected + 1).min(peer_list.len().saturating_sub(1));
+
                             active_tab = 0;
                         }
                     }
+
                     KeyCode::Enter => {
                         let command = input.trim().to_string();
 
@@ -712,34 +978,38 @@ async fn run_ui(
                                 picker = Some(FilePicker::new());
                                 input.clear();
                             }
+
                             continue;
                         }
 
                         if !command.is_empty() && !peer_list.is_empty() {
                             let peer = peer_list[selected].clone();
+
                             let text = command;
 
                             if send_chat(&peer, my_id, my_secret, &text).await.is_ok() {
-                                messages.entry(peer.id.clone()).or_default().push(
-                                    Message {
-                                        from: name.to_string(),
-                                        text,
-                                        incoming: false,
-                                        time: clock(),
-                                        file_path: None,
-                                    },
-                                );
+                                messages.entry(peer.id.clone()).or_default().push(Message {
+                                    from: name.to_string(),
+                                    text,
+                                    incoming: false,
+                                    time: clock(),
+                                    file_path: None,
+                                });
+
                                 input.clear();
                             }
                         }
                     }
+
                     KeyCode::Backspace => {
                         input.pop();
                     }
+
                     KeyCode::Char(c) => {
                         input.push(c);
                         active_tab = 2;
                     }
+
                     _ => {}
                 }
             }
@@ -747,14 +1017,6 @@ async fn run_ui(
     }
 
     Ok(())
-}
-
-#[derive(Debug)]
-struct IncomingFile {
-    path: PathBuf,
-    size: u64,
-    total: u64,
-    received: u64,
 }
 
 fn draw_ui(
@@ -781,10 +1043,7 @@ fn draw_ui(
         .split(size);
 
     let header = Paragraph::new(Line::from(vec![
-        Span::styled(
-            " LAN CHAT ",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(" LAN CHAT ", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw("  "),
         Span::styled(
             format!("{} online", peers.len()),
@@ -796,6 +1055,7 @@ fn draw_ui(
         Span::styled("E2E", Style::default().fg(Color::Green)),
     ]))
     .block(Block::default().borders(Borders::BOTTOM));
+
     f.render_widget(header, root[0]);
 
     let body = Layout::default()
@@ -809,15 +1069,13 @@ fn draw_ui(
             ListItem::new(Line::from(vec![
                 Span::styled("● ", Style::default().fg(Color::Green)),
                 Span::raw(&p.name),
-                Span::styled(
-                    format!("  {}", p.id),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(format!("  {}", p.id), Style::default().fg(Color::DarkGray)),
             ]))
         })
         .collect();
 
     let mut state = ListState::default();
+
     if !peers.is_empty() {
         state.select(Some(selected));
     }
@@ -833,12 +1091,14 @@ fn draw_ui(
     let users = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(" Users "))
         .highlight_style(user_style.add_modifier(Modifier::REVERSED));
+
     f.render_stateful_widget(users, body[0], &mut state);
 
     if let Some(file_picker) = picker {
         draw_file_picker(f, body[1], file_picker);
     } else {
         let selected_id = peers.get(selected).map(|p| p.id.clone());
+
         let chat_lines = if let Some(id) = selected_id {
             messages
                 .get(&id)
@@ -847,6 +1107,7 @@ fn draw_ui(
                 .into_iter()
                 .map(|m| {
                     let prefix = if m.incoming { "←" } else { "→" };
+
                     let style = if m.incoming {
                         Style::default().fg(Color::White)
                     } else {
@@ -864,10 +1125,7 @@ fn draw_ui(
                             format!("{prefix} {} ", m.time),
                             Style::default().fg(Color::DarkGray),
                         ),
-                        Span::styled(
-                            format!("{}: ", m.from),
-                            style.add_modifier(Modifier::BOLD),
-                        ),
+                        Span::styled(format!("{}: ", m.from), style.add_modifier(Modifier::BOLD)),
                         Span::styled(rendered, style),
                     ])
                 })
@@ -882,6 +1140,7 @@ fn draw_ui(
         let chat = Paragraph::new(chat_lines)
             .block(Block::default().borders(Borders::ALL).title(" Chat "))
             .wrap(Wrap { trim: false });
+
         f.render_widget(chat, body[1]);
     }
 
@@ -891,19 +1150,20 @@ fn draw_ui(
         " Message "
     };
 
-    // The input is a single logical line because Enter sends the message.
-    // Wrap it visually and scroll vertically so long Persian/LTR mixed text
-    // never disappears past the bottom of the input box.
     let inner_width = root[2].width.saturating_sub(2).max(1) as usize;
+
     let wrapped_lines = input
         .split('\n')
         .map(|line| {
             let width = UnicodeWidthStr::width(line).max(1);
+
             width.div_ceil(inner_width)
         })
         .sum::<usize>()
         .max(1);
+
     let visible_lines = root[2].height.saturating_sub(2).max(1) as usize;
+
     let input_scroll = wrapped_lines
         .saturating_sub(visible_lines)
         .min(u16::MAX as usize) as u16;
@@ -912,6 +1172,7 @@ fn draw_ui(
         .block(Block::default().borders(Borders::ALL).title(input_title))
         .wrap(Wrap { trim: false })
         .scroll((input_scroll, 0));
+
     f.render_widget(input_box, root[2]);
 
     let footer = Paragraph::new(Line::from(vec![
@@ -930,6 +1191,7 @@ fn draw_ui(
             Style::default().fg(Color::DarkGray),
         ),
     ]));
+
     f.render_widget(footer, root[3]);
 }
 
@@ -945,16 +1207,19 @@ fn draw_file_picker(f: &mut Frame, area: ratatui::layout::Rect, picker: &FilePic
                 .unwrap_or("?");
 
             let prefix = if entry.is_dir { "📁 " } else { "📄 " };
+
             ListItem::new(format!("{prefix}{name}"))
         })
         .collect::<Vec<_>>();
 
     let mut state = ListState::default();
+
     if !items.is_empty() {
         state.select(Some(picker.selected));
     }
 
     let title = format!(" Files — {} ", picker.cwd.display());
+
     let widget = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(
@@ -966,14 +1231,11 @@ fn draw_file_picker(f: &mut Frame, area: ratatui::layout::Rect, picker: &FilePic
     f.render_stateful_widget(widget, area, &mut state);
 }
 
-async fn send_chat(
-    peer: &Peer,
-    my_id: &str,
-    my_secret: &[u8; 32],
-    text: &str,
-) -> Result<()> {
+async fn send_chat(peer: &Peer, my_id: &str, my_secret: &[u8; 32], text: &str) -> Result<()> {
     let mut stream = TcpStream::connect(peer.addr).await?;
+
     let key = shared_key(my_secret, &peer.pubkey);
+
     let ciphertext = encrypt_bytes(&key, text.as_bytes())?;
 
     let packet = Packet::Chat {
@@ -983,18 +1245,24 @@ async fn send_chat(
     };
 
     let mut data = serde_json::to_vec(&packet)?;
+
     data.push(b'\n');
+
     stream.write_all(&data).await?;
+
     Ok(())
 }
 
-async fn send_file(
-    peer: &Peer,
-    my_id: &str,
-    my_secret: &[u8; 32],
-    path: &Path,
-) -> Result<()> {
-    let metadata = fs::metadata(path)?;
+// ============================================================
+// BACKGROUND FILE SENDER
+//
+// This function no longer runs inside the UI event loop.
+// It is spawned with tokio::spawn().
+// ============================================================
+
+async fn send_file(peer: Peer, my_id: String, my_secret: [u8; 32], path: PathBuf) -> Result<()> {
+    let metadata = tokio::fs::metadata(&path).await?;
+
     if !metadata.is_file() {
         anyhow::bail!("not a regular file");
     }
@@ -1006,21 +1274,28 @@ async fn send_file(
         .to_string();
 
     let size = metadata.len();
+
     let total = ((size as usize + FILE_CHUNK - 1) / FILE_CHUNK).max(1) as u64;
-    let key = shared_key(my_secret, &peer.pubkey);
-    let mut file = File::open(path)?;
+
+    let key = shared_key(&my_secret, &peer.pubkey);
+
+    let mut file = TokioFile::open(&path).await?;
+
     let mut stream = TcpStream::connect(peer.addr).await?;
 
     let mut buf = vec![0u8; FILE_CHUNK];
+
     for index in 0..total {
-        let n = std::io::Read::read(&mut file, &mut buf)?;
+        let n = file.read(&mut buf).await?;
+
         if n == 0 && size > 0 {
             break;
         }
 
         let ciphertext = encrypt_bytes(&key, &buf[..n])?;
+
         let packet = Packet::File {
-            from: my_id.to_string(),
+            from: my_id.clone(),
             name: name.clone(),
             size,
             index,
@@ -1029,7 +1304,9 @@ async fn send_file(
         };
 
         let mut line = serde_json::to_vec(&packet)?;
+
         line.push(b'\n');
+
         stream.write_all(&line).await?;
 
         if n == 0 {
@@ -1037,20 +1314,31 @@ async fn send_file(
         }
     }
 
+    // Make sure all buffered socket data is handed
+    // to the OS before reporting completion.
+    stream.flush().await?;
+
     Ok(())
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
+
     let mut out = stdout();
+
     execute!(out, EnterAlternateScreen)?;
+
     let backend = CrosstermBackend::new(out);
+
     Ok(Terminal::new(backend)?)
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode()?;
+
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+
     terminal.show_cursor()?;
+
     Ok(())
 }

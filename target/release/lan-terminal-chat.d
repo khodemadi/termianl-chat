@@ -1,1 +1,1 @@
-/home/wrench/termianl-chat/target/release/lan-terminal-chat: /home/wrench/termianl-chat/src/main.rs
+/home/madi/w/termianl-chat/target/release/lan-terminal-chat: /home/madi/w/termianl-chat/src/main.rs
